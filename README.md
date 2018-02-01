@@ -1,1 +1,1 @@
-A librar for research infrastructure for deep learning.
+A library for research infrastructure for deep learning.
