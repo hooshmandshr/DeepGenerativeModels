@@ -145,13 +145,13 @@ class AutoEncodingVariationalBayes(object):
             # Expected value of Log-likelihood with respect to
             # recognition model.
             self.loss += tf.reduce_sum(
-                tf.reduce_mean(p.log_density(self.x), axis=0))
+                tf.reduce_mean(self.decoder.log_density(self.x), axis=0))
             # Entropy of recognition model.
             self.loss += tf.reduce_sum(
-                self.decoder.entropy(n_samples=self.z.shape[0].value))
+                self.encoder.entropy(n_samples=self.z.shape[0].value))
             # Expected value of the prior on latent space.
             self.loss += tf.reduce_sum(
-                self.prior.log_prob(z))
+                self.prior.log_prob(self.z))
             self.train_op = self.optimizer.minimize(-self.loss)
             self.recon = self.decoder.cond_sample()
 
@@ -187,3 +187,4 @@ class NormalizingFlow(ConditionalStochasticModel):
 
     def __init__(self, graph, dim):
         super(NormalizingFlow, self).__init__(graph, dim)
+
