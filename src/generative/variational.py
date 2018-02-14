@@ -70,7 +70,7 @@ class ConditionalStochasticModel(object):
         return tf.reduce_mean(function(self.cond_sample(n_samples)), axis=0)
 
     def entropy(self, n_samples=1):
-        """Computes (estimate or analytical) entropy of the variational distribution."""
+        """Computes monte-carlo estimate of entropy of the random variable."""
         return self.expected_value(self.neg_log_density, n_samples=n_samples)
 
 
@@ -84,9 +84,11 @@ class MultiLayerStochastic(ConditionalStochasticModel):
         layers = hidden_layers + [self.dim]
         with self.graph.as_default():
             self.mu = MultiLayerPerceptron(self.a, layers).get_output_layer()
-            self.sigma = MultiLayerPerceptron(self.a, layers).get_output_layer()
+            self.sigma = MultiLayerPerceptron(
+                self.a, layers).get_output_layer()
             # Added epsilon term basically initializes scale to be non-zero.
-            self.scale = tf.pow(self.sigma, 2) + 0.0001
+            epsilon = 0.000001
+            self.scale = tf.pow(self.sigma, 2) + epsilon
             self.distribution = tf.distributions.Normal(
                 loc=self.mu, scale=self.scale)
 
@@ -112,11 +114,14 @@ class AutoEncodingVariationalBayes(object):
             Variational model Q(Z|X)
         """
         if not isinstance(prob_model, ConditionalStochasticModel):
-            raise ValueError("Probability model should be of type 'ConditionalStochasticModel'.")
+            raise ValueError(
+                "prob_model should be of type 'ConditionalStochasticModel'.")
         if not isinstance(recognition_model, ConditionalStochasticModel):
-            raise ValueError("Recognition model should be of type 'ConditionalStochasticModel'.")
+            raise ValueError(
+                "recognition_model should be of type 'ConditionalStochasticModel'.")
         if not recognition_model.graph == prob_model.graph:
-            raise ValueError("Both models should share the same graph.")
+            raise ValueError(
+                "Both models should share the same graph.")
         if not isinstance(optimizer, tf.train.Optimizer):
             raise ValueError("optimizer should be of type 'tf.train.Optimizer'.")
         # Probability model plays the role of decoder
@@ -170,21 +175,23 @@ class AutoEncodingVariationalBayes(object):
     def fit(self, observations):
         """Fit the recognition model and data model simultaneously one step."""
         with self.graph.as_default():
-            return self.session.run([self.train_op, self.loss], feed_dict={self.x: observations})
+            return self.session.run(
+                [self.train_op, self.loss], feed_dict={self.x: observations})
 
     def code_reconstruct(self, observations):
         """Reconstructs observations using the given codes."""
         with self.graph.as_default():
-            return self.session.run([self.z, self.recon], feed_dict={self.x: observations})
+            return self.session.run(
+                [self.z, self.recon], feed_dict={self.x: observations})
 
     def loss(self, observations):
         """Computes the current evidence lower-bound."""
         with self.graph.as_default():
-            return self.session.run(self.loss, feed_dict={self.x: observations})
+            return self.session.run(
+                self.loss, feed_dict={self.x: observations})
 
 class NormalizingFlow(ConditionalStochasticModel):
     """Normalizing flow random variable for hooshmand shokri razaghi."""
 
     def __init__(self, graph, dim):
         super(NormalizingFlow, self).__init__(graph, dim)
-
