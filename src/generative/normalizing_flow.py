@@ -1,24 +1,21 @@
-"""Implementation of normalizing flow."""
-
-import numpy as np
-import tensorflow as tf
-
 class PlanarFlow(object):
     """Class for defining operations for a normalizing flow."""
 
     def __init__(self, dim, w=None, b=None, u=None):
+        self.dim = dim
         if w is None or b is None or u is None:
-            #w = tf.Variable(np.random.normal(0, 1, [dim, 1]))
-            #b = tf.Variable(np.random.normal(0, 1, 1))
-            #u = tf.Variable(np.random.normal(0, 1, [1, dim]))
-            w = tf.Variable(np.array([[1.0, 1.0]]).T)
-            b = tf.Variable(np.array(0.0))
-            u = tf.Variable(np.array([[2.0, 2.0]]))
-        self.w = w
-        self.b = b
-        self.u = u
+            self.create_flow_variables()
+        else:
+            self.w = w
+            self.b = b
+            self.u = u
         # Enforcing reversibility.
         self.u_bar = self.reversible_constraint(self.u, self.w)
+
+    def create_flow_variables(self):
+        self.w = tf.Variable(np.random.normal(0, 1, [self.dim, 1]))
+        self.b = tf.Variable(np.random.normal(0, 1, 1))
+        self.u = tf.Variable(np.random.normal(0, 1, [1, self.dim]))
 
     def reversible_constraint(self, u, w):
         dot = tf.squeeze(tf.matmul(u, w))
@@ -33,8 +30,8 @@ class PlanarFlow(object):
 
     def log_det_jacobian(self, inputs):
         dialation = tf.matmul(inputs, self.w) + self.b
-        psi = (1 - tf.pow(tf.tanh(dialation), 2))
-        det_jac = tf.matmul(self.u * psi, self.w)
+        psi = 1.0 - tf.pow(tf.tanh(dialation), 2)
+        det_jac = tf.matmul(self.u_bar, self.w) * psi
         return - tf.squeeze(tf.log(tf.abs(1 + det_jac)))
 
 class FlowRandomVariable(object):
@@ -50,16 +47,17 @@ class FlowRandomVariable(object):
         for i in range(self.num_layers):
             self.flows.append(PlanarFlow(dim))
 
-    def log_density(self, x):
-        log_prob = tf.reduce_sum(
-            self.base_dist.log_prob(x), axis=1)
-        for flow in self.flows:
-            log_prob += flow.log_det_jacobian(x)
-            x = flow.transform(x)
-        return log_prob
-
-    def sample(self, n_samples):
+    def sample_log_prob(self, n_samples):
+        """Provide samples from the flow distribution and its log prob."""
         samples = self.base_dist.sample(n_samples)
+        log_prob = tf.reduce_sum(
+            self.base_dist.log_prob(samples), axis=1)
         for flow in self.flows:
+            log_prob += flow.log_det_jacobian(samples)
             samples = flow.transform(samples)
-        return samples
+        return samples, log_prob
+
+    def transform(self, x):
+        for flow in self.flows:
+            x = flow.transform(x)
+        return x
