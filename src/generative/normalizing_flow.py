@@ -1,7 +1,23 @@
+import numpy as np
+import tensorflow as tf
+
+from variational import MultiLayerPerceptron
+
 class PlanarFlow(object):
     """Class for defining operations for a normalizing flow."""
 
     def __init__(self, dim, w=None, b=None, u=None):
+        """Sets up the parameters of a planar normalizing flow.
+
+        Parameters:
+        -----------
+        w: tf.Tensor or None
+            shape should be (dim, 1)
+        b: tf.Tensor or None
+            Scalar
+        u: tf.Tensor or None
+            shape should be (1, dim)
+        """
         self.dim = dim
         if w is None or b is None or u is None:
             self.create_flow_variables()
@@ -37,16 +53,37 @@ class PlanarFlow(object):
 
 class FlowRandomVariable(object):
 
-    def __init__(self, dim, num_layers, base_dist=None):
+    def __init__(self, dim, num_layers=1, flows=None,  base_dist=None):
+        """Sets up a normalizing flow random variable.
+
+        Parameters:
+        -----------
+        dim: int
+            Dimensionality of the random variable.
+        num_layers: int
+            Number of layers of transformation for the nomralizing
+            flow.
+        flows: list of normalizing_flow.PlanarFlow
+            Parameters of the reversible tranformations. If None,
+            the parameters are set to tf.Variables that are initialized
+            randomly.
+        base_dist: tensorflow.distributions
+            Probability distribution of the original space.
+        """
         if base_dist is None:
             base_dist = tf.distributions.Normal(
                 loc=np.zeros(dim), scale=np.ones(dim))
         self.dim = dim
         self.num_layers = num_layers
         self.base_dist = base_dist
-        self.flows = []
-        for i in range(self.num_layers):
-            self.flows.append(PlanarFlow(dim))
+        self.flows = flows
+        if self.flows is None:
+            self.num_layers = num_layers
+            self.flows = []
+            for i in range(self.num_layers):
+                self.flows.append(PlanarFlow(dim))
+        else:
+            self.num_layrs = len(self.flows)
 
     def sample_log_prob(self, n_samples):
         """Provide samples from the flow distribution and its log prob."""
@@ -62,6 +99,42 @@ class FlowRandomVariable(object):
         for flow in self.flows:
             x = flow.transform(x)
         return x
+
+
+class FlowConditionalVariable(object):
+    """Class for a conditional random variable X|Y."""
+
+    def __init__(self, dim_x, y, flow_layers):
+        self.y = y
+        self.dim_x = dim_x
+        self.dim_y = y.shape[1].value
+        self.flow_layers = flow_layers
+        # Total number of inputs
+        self.n_points = y.shape[0].value
+        self.set_up_flows()
+
+    def set_up_flows(self):
+        # Non-linear function of Y
+        w_mlp = MultiLayerPerceptron(
+            self.y, layers=[128, 128, self.dim_x * self.flow_layers])
+        all_w = w_mlp.get_output_layer()
+        u_mlp = MultiLayerPerceptron(
+            self.y, layers=[128, 128, self.dim_x * self.flow_layers])
+        all_u = u_mlp.get_output_layer()
+        b_mlp = MultiLayerPerceptron(
+            self.y, layers=[128, 128, self.flow_layers])
+        all_b = b_mlp.get_output_layer()
+        # Slice the output layers into shapes of parameters of flows.
+        flows = []
+        for i in range(self.flow_layers):
+            w = tf.slice(all_w, [0, i * self.dim_x], [-1, self.dim_x])
+            u = tf.slice(all_u, [0, i * self.dim_x], [-1, self.dim_x])
+            b = tf.squeeze(tf.slice(all_b, [0, i], [-1, 1]))
+            flows.append(PlanarFlow(b, u=u, w=tf.transpose(w), b=b))
+        self.variable = FlowRandomVariable(dim=self.dim_x, flows=flows)
+
+    def sample_log_prob(self, n_samples):
+        return self.variable.sample_log_prob(n_samples)
 
 
 class DynaFlowRandomVariable(object):
