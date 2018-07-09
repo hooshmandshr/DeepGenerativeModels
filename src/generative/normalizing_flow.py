@@ -12,11 +12,11 @@ class PlanarFlow(object):
         Parameters:
         -----------
         w: tf.Tensor or None
-            shape should be (dim, 1)
+            shape should be (N, dim)
         b: tf.Tensor or None
-            Scalar
+            shape should be (N)
         u: tf.Tensor or None
-            shape should be (1, dim)
+            shape should be (N, dim)
         """
         self.dim = dim
         if w is None or b is None or u is None:
@@ -27,28 +27,65 @@ class PlanarFlow(object):
             self.u = u
         # Enforcing reversibility.
         self.u_bar = self.reversible_constraint()
+        # Total number of flows.
+        self.n_flows = self.u.shape[0].value
+
+    def is_single_flow(self):
+        """Indicates whether the flow consists of only one transformation."""
+        return self.n_flows == 1
 
     def create_flow_variables(self):
-        self.w = tf.Variable(np.random.normal(0, 1, [self.dim, 1]))
+        """Sets up variables for the single planar flow."""
+        self.w = tf.Variable(np.random.normal(0, 1, [1, self.dim]))
         self.b = tf.Variable(np.random.normal(0, 1, 1))
         self.u = tf.Variable(np.random.normal(0, 1, [1, self.dim]))
 
     def reversible_constraint(self):
-        dot = tf.squeeze(tf.matmul(self.u, self.w))
+        dot = tf.reduce_sum((self.u * self.w), axis=1, keepdims=True)
         scalar = - 1 + tf.nn.softplus(dot) - dot
-        norm_squared = tf.reduce_sum(self.w * self.w)
-        comp = scalar * tf.transpose(self.w) / norm_squared
-        return self.u + comp
+        norm_squared = tf.reduce_sum(self.w * self.w, axis=1, keepdims=True)
+        comp = scalar * self.w / norm_squared
+        return self.u + comp  
 
     def transform(self, inputs):
-        dialation = tf.matmul(inputs, self.w) + self.b
-        return inputs + self.u_bar * tf.tanh(dialation)
+        """Transforms the inputs according to the state of the flow.
+        
+        Parameters:
+        -----------
+        inputs: tensorflow.Tensor
+        Shape should be [self.n_flows, ?, self.dim] if self.n_flows > 1.
+        If self.n_flows == 1 then shape should be [?, self.dim].
+        """
+        if self.is_single_flow():
+            dialation = tf.matmul(inputs, self.w, transpose_b=True) + self.b
+            return inputs + self.u_bar * tf.tanh(dialation)
+        else:
+            dialation = tf.matmul(inputs, tf.expand_dims(self.w, 2)) +\
+            tf.expand_dims(tf.expand_dims(self.b, 1), 2)
+            return inputs + tf.expand_dims(self.u_bar, 1) * tf.tanh(dialation)
 
     def log_det_jacobian(self, inputs):
-        dialation = tf.matmul(inputs, self.w) + self.b
-        psi = 1.0 - tf.pow(tf.tanh(dialation), 2)
-        det_jac = tf.matmul(self.u_bar, self.w) * psi
-        return - tf.squeeze(tf.log(tf.abs(1 + det_jac)))
+        """Computes log-det-Jacobian for combination of inputs, flows.
+        
+        Parameters:
+        -----------
+        inputs: tensorflow.Tensor
+        Shape should be [self.n_flows, ?, self.dim] if self.n_flows > 1.
+        If self.n_flows == 1 then shape should be [?, self.dim].
+        """
+        if self.is_single_flow():
+            dialation = tf.matmul(inputs, self.w, transpose_b=True) + self.b
+            psi = 1.0 - tf.pow(tf.tanh(dialation), 2)
+            det_jac = tf.matmul(self.u_bar, self.w, transpose_b=True) * psi
+            return - tf.squeeze(tf.log(tf.abs(1 + det_jac)))
+        else:
+            dialation = tf.matmul(inputs, tf.expand_dims(self.w, 2)) +\
+            tf.expand_dims(tf.expand_dims(self.b, 1), 2)
+            psi = 1.0 - tf.pow(tf.tanh(dialation), 2)
+            dot = tf.reduce_sum(self.u_bar * self.w, axis=1, keepdims=True)
+            dot = tf.expand_dims(dot, 1)
+            det_jac = dot * psi
+            return - tf.squeeze(tf.log(tf.abs(1 + det_jac)))
 
 
 class FlowRandomVariable(object):
@@ -87,9 +124,12 @@ class FlowRandomVariable(object):
 
     def sample_log_prob(self, n_samples):
         """Provide samples from the flow distribution and its log prob."""
-        samples = self.base_dist.sample(n_samples)
-        log_prob = tf.reduce_sum(
-            self.base_dist.log_prob(samples), axis=1)
+        if isinstance(self.base_dist, tf.distributions.Distribution):
+            samples = self.base_dist.sample(n_samples)
+            log_prob = tf.reduce_sum(
+                self.base_dist.log_prob(samples), axis=1)
+        else:
+            samples, log_prob = self.base_dist
         for flow in self.flows:
             log_prob += flow.log_det_jacobian(samples)
             samples = flow.transform(samples)
@@ -102,7 +142,12 @@ class FlowRandomVariable(object):
 
 
 class FlowConditionalVariable(object):
-    """Class for a conditional random variable X|Y."""
+    """Class for a conditional random variable X|Y.
+
+    This conditional density is a normalizing flow
+    whose parameters are governed by an MLP of the
+    variable that the density if conditioned upon.
+    """
 
     def __init__(self, dim_x, y, flow_layers):
         self.y = y
