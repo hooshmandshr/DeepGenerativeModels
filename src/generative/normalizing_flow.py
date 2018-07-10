@@ -3,6 +3,7 @@ import tensorflow as tf
 
 from variational import MultiLayerPerceptron
 
+
 class PlanarFlow(object):
     """Class for defining operations for a normalizing flow."""
 
@@ -29,6 +30,9 @@ class PlanarFlow(object):
         self.u_bar = self.reversible_constraint()
         # Total number of flows.
         self.n_flows = self.u.shape[0].value
+
+    def get_flow_number(self):
+        return self.n_flows
 
     def is_single_flow(self):
         """Indicates whether the flow consists of only one transformation."""
@@ -125,9 +129,15 @@ class FlowRandomVariable(object):
     def sample_log_prob(self, n_samples):
         """Provide samples from the flow distribution and its log prob."""
         if isinstance(self.base_dist, tf.distributions.Distribution):
-            samples = self.base_dist.sample(n_samples)
-            log_prob = tf.reduce_sum(
-                self.base_dist.log_prob(samples), axis=1)
+            if self.flows[0].is_single_flow():
+                samples = self.base_dist.sample(n_samples)
+                log_prob = tf.reduce_sum(
+                    self.base_dist.log_prob(samples), axis=1)
+            else:
+                n_flows = self.flows[0].get_flow_number()
+                samples = self.base_dist.sample([n_flows, n_samples])
+                log_prob = tf.reduce_sum(
+                    self.base_dist.log_prob(samples), axis=2)           
         else:
             samples, log_prob = self.base_dist
         for flow in self.flows:
@@ -149,13 +159,14 @@ class FlowConditionalVariable(object):
     variable that the density if conditioned upon.
     """
 
-    def __init__(self, dim_x, y, flow_layers):
+    def __init__(self, dim_x, y, flow_layers, base_dist=None):
         self.y = y
         self.dim_x = dim_x
         self.dim_y = y.shape[1].value
         self.flow_layers = flow_layers
         # Total number of inputs
         self.n_points = y.shape[0].value
+        self.base_dist = base_dist
         self.set_up_flows()
 
     def set_up_flows(self):
@@ -171,12 +182,19 @@ class FlowConditionalVariable(object):
         all_b = b_mlp.get_output_layer()
         # Slice the output layers into shapes of parameters of flows.
         flows = []
+        all_u += 1
+        all_w += 1
         for i in range(self.flow_layers):
             w = tf.slice(all_w, [0, i * self.dim_x], [-1, self.dim_x])
             u = tf.slice(all_u, [0, i * self.dim_x], [-1, self.dim_x])
             b = tf.squeeze(tf.slice(all_b, [0, i], [-1, 1]))
-            flows.append(PlanarFlow(b, u=u, w=tf.transpose(w), b=b))
-        self.variable = FlowRandomVariable(dim=self.dim_x, flows=flows)
+            flows.append(PlanarFlow(b, u=u, w=w, b=b))
+        self.variable = FlowRandomVariable(
+            dim=self.dim_x, flows=flows, base_dist=self.base_dist)
+        # Set up object reference to internal parameters
+        self.w = all_w
+        self.u = all_u
+        self.b = all_b
 
     def sample_log_prob(self, n_samples):
         return self.variable.sample_log_prob(n_samples)
