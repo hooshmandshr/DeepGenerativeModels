@@ -159,7 +159,7 @@ class FlowConditionalVariable(object):
     variable that the density if conditioned upon.
     """
 
-    def __init__(self, dim_x, y, flow_layers, base_dist=None):
+    def __init__(self, dim_x, y, flow_layers, hidden_units=[256, 128], base_dist=None):
         self.y = y
         self.dim_x = dim_x
         self.dim_y = y.shape[1].value
@@ -167,23 +167,22 @@ class FlowConditionalVariable(object):
         # Total number of inputs
         self.n_points = y.shape[0].value
         self.base_dist = base_dist
+        self.hidden_units = hidden_units
         self.set_up_flows()
 
     def set_up_flows(self):
         # Non-linear function of Y
         w_mlp = MultiLayerPerceptron(
-            self.y, layers=[128, 128, self.dim_x * self.flow_layers])
+            self.y, layers=self.hidden_units + [self.dim_x * self.flow_layers], activation=tf.nn.tanh)
         all_w = w_mlp.get_output_layer()
         u_mlp = MultiLayerPerceptron(
-            self.y, layers=[128, 128, self.dim_x * self.flow_layers])
+            self.y, layers=self.hidden_units + [self.dim_x * self.flow_layers], activation=tf.nn.tanh)
         all_u = u_mlp.get_output_layer()
         b_mlp = MultiLayerPerceptron(
-            self.y, layers=[128, 128, self.flow_layers])
+            self.y, layers=self.hidden_units + [self.flow_layers], activation=tf.nn.tanh)
         all_b = b_mlp.get_output_layer()
         # Slice the output layers into shapes of parameters of flows.
         flows = []
-        all_u += 1
-        all_w += 1
         for i in range(self.flow_layers):
             w = tf.slice(all_w, [0, i * self.dim_x], [-1, self.dim_x])
             u = tf.slice(all_u, [0, i * self.dim_x], [-1, self.dim_x])
@@ -249,3 +248,132 @@ class DynaFlowRandomVariable(object):
         # Concatenate the subsets to form a single tensor.
         final_samples = tf.concat(final_samples, axis=1)
         return final_samples, log_prob
+
+
+class DynaFlowConditionalRandomVariable(object):
+
+    def __init__(self, y, dim, time, num_layers, base_dist=None):
+        """Sets up the prelimnary computation graphs.
+
+        Parameters:
+        -----------y = tf.repeat(y, 2)
+        y: numpy.ndarray0
+            N input paths. Shape is (N, time * in_dim)
+        dim: int
+            Dimensionality of latent space.
+        time: int
+            Number of time step in the dynamical system.
+        num_layers: int
+            Number of normalizing flow layers. Regulates
+            complexity of the model.
+        base_dist: tf.distributions.Distribution or (tf.Tensor, tf.Tensor)
+            Initial distribution to be transformed by the normalizing flow.
+        """
+        # Full dimensionality of the latent space.
+        self.full_dim = dim * time
+        if base_dist is None:
+            base_dist = tf.distributions.Normal(
+                loc=np.zeros(self.full_dim), scale=np.ones(self.full_dim))
+        self.dim = dim
+        self.n_time = time
+        self.num_layers = num_layers
+        self.base_dist = base_dist
+        self.flows = []
+        # Input properties
+        self.y = y
+        self.n_example = y.shape[0].value
+        self.obs_dim = y.shape[1].value // self.n_time
+        # Set up planar flow layers.
+        self.setup_flow_layers()
+
+    def unfold_time_pairs(self):
+        unfold = tf.reshape(self.y, [self.n_example, self.n_time, self.obs_dim])
+        x1 = tf.slice(unfold, [0, 0, 0], [-1, self.n_time - 1, -1])
+        x2 = tf.slice(unfold, [0, 1, 0], [-1, -1, -1])
+        unfold_x = tf.reshape(
+            tf.concat([x1, x2], axis=2), [self.n_example * (self.n_time - 1), 2 * self.obs_dim])
+        return unfold_x
+
+    def get_flow_parameters(self, param_group, time, layer, dim):
+        param_group = tf.reshape(
+            param_group, [self.n_example, self.n_time - 1, dim * self.num_layers])
+        return tf.squeeze(tf.slice(
+            param_group,
+            [0, time, layer * dim],
+            [-1, 1, dim]))
+    
+    def setup_flow_layers(self):
+        """Sets up the network regulating parameters of the flow."""
+        hidden_units = 128
+        unfolded = self.unfold_time_pairs()
+        self.u_mlp = MultiLayerPerceptron(
+            unfolded, layers=[hidden_units, hidden_units, self.dim * 2 * self.num_layers]).get_output_layer()
+        self.w_mlp = MultiLayerPerceptron(
+            unfolded, layers=[hidden_units, hidden_units, self.dim * 2 * self.num_layers]).get_output_layer()
+        self.b_mlp = MultiLayerPerceptron(
+            unfolded, layers=[hidden_units, hidden_units, self.num_layers]).get_output_layer()
+        for t in range(self.n_time - 1):
+            self.flows.append([])
+            for i in range(self.num_layers):
+                time_layer_u = self.get_flow_parameters(self.u_mlp, time=t, layer=i, dim=self.dim * 2)
+                time_layer_w = self.get_flow_parameters(self.w_mlp, time=t, layer=i, dim=self.dim * 2)
+                time_layer_b = self.get_flow_parameters(self.b_mlp, time=t, layer=i, dim=1)
+                if len(time_layer_u.shape) == 1:
+                    time_layer_u = tf.expand_dims(time_layer_u, 0)
+                    time_layer_w = tf.expand_dims(time_layer_w, 0)
+                    time_layer_b = tf.expand_dims(time_layer_b, 0)
+                self.flows[t].append(
+                    PlanarFlow(2 * self.dim, u=time_layer_u, w=time_layer_w, b=time_layer_b))
+
+    def sample_log_prob(self, n_samples):
+        """Provide samples from the flow distribution and its log prob."""
+        if self.n_example == 1:
+            samples = self.base_dist.sample(n_samples)
+            log_prob = tf.reduce_sum(
+                self.base_dist.log_prob(samples), axis=1)
+            # Transform two consecutive variables in time.
+            final_samples = []
+            single_time_latent_size = [n_samples, self.dim]
+            pre_latent = tf.slice(samples, [0, 0], single_time_latent_size)
+            for i, time_flow in enumerate(self.flows):
+                cur_latent = tf.slice(
+                    samples, [0, (i + 1) * self.dim], single_time_latent_size)
+                latent_pair = tf.concat([pre_latent, cur_latent], axis=1)
+                for layer in time_flow:
+                    log_prob += layer.log_det_jacobian(latent_pair)
+                    latent_pair = layer.transform(latent_pair)
+                # Accumulate the transformed time subsets.
+                final_samples.append(
+                    tf.slice(latent_pair, [0, 0], single_time_latent_size))
+                pre_latent = tf.slice(
+                    latent_pair, [0, self.dim], single_time_latent_size)
+            # Last time stamp does does not have a following variable.
+            final_samples.append(pre_latent)
+            # Concatenate the subsets to form a single tensor.
+            final_samples = tf.concat(final_samples, axis=1)
+            return final_samples, log_prob
+        else:
+            samples = self.base_dist.sample([self.n_example, n_samples])
+            log_prob = tf.reduce_sum(
+                self.base_dist.log_prob(samples), axis=2)
+            # Transform two consecutive variables in time.
+            final_samples = []
+            single_time_latent_size = [self.n_example, n_samples, self.dim]
+            pre_latent = tf.slice(samples, [0, 0, 0], single_time_latent_size)
+            for i, time_flow in enumerate(self.flows):
+                cur_latent = tf.slice(
+                    samples, [0, 0, (i + 1) * self.dim], single_time_latent_size)
+                latent_pair = tf.concat([pre_latent, cur_latent], axis=2)
+                for layer in time_flow:
+                    log_prob += layer.log_det_jacobian(latent_pair)
+                    latent_pair = layer.transform(latent_pair)
+                # Accumulate the transformed time subsets.
+                final_samples.append(
+                    tf.slice(latent_pair, [0, 0, 0], single_time_latent_size))
+                pre_latent = tf.slice(
+                    latent_pair, [0, 0, self.dim], single_time_latent_size)
+            # Last time stamp does does not have a following variable.
+            final_samples.append(pre_latent)
+            # Concatenate the subsets to form a single tensor.
+            final_samples = tf.concat(final_samples, axis=2)
+            return final_samples, log_prob
