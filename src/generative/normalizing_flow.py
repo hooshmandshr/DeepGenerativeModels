@@ -126,6 +126,21 @@ class FlowRandomVariable(object):
         else:
             self.num_layrs = len(self.flows)
 
+    def get_all_flow_params(self):
+        """Returns parameters of the flow layers.
+
+        Returns:
+        --------
+        tuple of size 3 where the first element is the concatenated
+        w variables of all flows. Simliarly, the second and the third
+        elements are concatenated u and b variables.
+        """
+        flow_range = range(self.num_layers)
+        all_w = tf.concat([self.flows[i].w for i in flow_range], axis=1)
+        all_u = tf.concat([self.flows[i].u for i in flow_range], axis=1)
+        all_b = tf.concat([self.flows[i].b for i in flow_range], axis=0)
+        return all_w, all_u, all_b
+
     def sample_log_prob(self, n_samples):
         """Provide samples from the flow distribution and its log prob."""
         if isinstance(self.base_dist, tf.distributions.Distribution):
