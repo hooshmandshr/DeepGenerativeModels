@@ -4,7 +4,8 @@ import tensorflow as tf
 class MultiLayerPerceptron(object):
 
     def __init__(self, input_tensor, layers, activation=tf.nn.relu,
-                 regul = tf.contrib.layers.l2_regularizer(0.1)):
+                 output_activation=None,
+                 regul=tf.contrib.layers.l2_regularizer(0.1)):
         """Sets up a multilayer perceptron computation graph."""
         with input_tensor.graph.as_default():
             transform = input_tensor
@@ -12,93 +13,93 @@ class MultiLayerPerceptron(object):
                 transform = tf.contrib.layers.fully_connected(
                     transform, units, weights_regularizer=regul,
                     activation_fn=activation)
-        self.output = transform
+        self.output = tf.contrib.layers.fully_connected(
+            transform, units, weights_regularizer=regul,
+            activation_fn=output_activation)
 
     def get_output_layer(self):
         """Retursn output tensor of the multilayer perceptron."""
         return self.output
 
 
-class ConditionalStochasticModel(object):
-    """Abstract class for conditional probability models P(X|A)."""
+class LogitNormal(tf.distributions.Normal):
 
-    def __init__(self, dim, a):
-        """Sets up the basic properties of random variable.
+    def __init__(self, loc, scale):
+        super(LogitNormal, self).__init__(loc=loc, scale=scale)
 
-        Args:
-        dim: int
-            Dimension of X (random variable).
-        a: tf.Tensor
-            Random variable A that X has been conditioned upon.
-        """
-        if not isinstance(a, tf.Tensor):
-            raise ValueError(
-                'Random variable A should be a tensor.')
-        self.graph = a.graph
-        self.dim = dim
+    def log_prob(self, value, name='log_prob'):
+        logit_value = tf.log(value / (1 - value))
+        log_prob = super(LogitNormal, self).log_prob(logit_value, name=name)
+        return log_prob - tf.log(value) - tf.log(1 - value)
 
-    def log_density(self, x):
-        """Computes log density of latent code.
+    def sample(self, sample_shape=(), seed=None, name='sample'):
+            sample = super(LogitNormal, self).sample(
+                sample_shape=sample_shape, seed=seed, name=name)
+            return tf.sigmoid(sample)
 
-        Parameters:
-        -----------
-        x: tf.Tensor of shape [None, self.dim]
-        """
-        pass
 
-    def neg_log_density(self, x):
-        """Computes negative log density of latent code.
+class ReparameterizedDistribution(object):
+    """Reparameterized Distributions for AEVB."""
+
+    def __init__(self, distribution, neural_net_function, **kwargs):
+        """Neural net functions to the parameters of the given dist.
 
         Parameters:
         -----------
-        x: tf.Tensor of shape [None, self.dim]
+        distribution: tensorflow.distributions.Distribution
+            distribution that is whose parameters will be neural network
+            function.
+        neural_net_function:
+            Specific architecture e.g. MultiLayerPerceptron that transforms
+            input into parameters of the distribution.
+        **kwargs:
+            Furtuer parameters to be passed to the neural_net_function i.e.
+            input tensor, layers, etc.
         """
-        return - self.log_density(x)
+        self.dist = None
+        self.param_a = neural_net_function(**kwargs).get_output_layer();
+        self.param_b = neural_net_function(**kwargs).get_output_layer();
+        if distribution is tf.distributions.Normal:
+            # Rectify standard deviation so that it is a smooth
+            # positive function
+            self.param_b = tf.nn.softmax(self.param_b + 1e-6)
+            self.dist = tf.distributions.Normal(
+                    loc=self.param_a, scale=self.param_b)
+        elif distribution is LogitNormal:
+            self.param_b = tf.nn.softmax(self.param_b + 1e-6)
+            self.dist = LogitNormal(
+                    loc=self.param_a, scale=self.param_b)
 
-    def cond_sample(self, n_samples=1):
-        """Samples n latent code from the variational family.
+    def get_distribution(self):
+        """Returns the reparameterized distributions.
 
-        should return samples of random variable a given b value.
+        Returns:
+        --------
+        tensorflow.distributions.Distribution
         """
-        pass
+        return self.dist
 
-    def expected_value(self, function, n_samples=1):
-        """Computes expected value of function using Monte Carlo estimation.
+    def log_prob(self, x):
+        """Computes log probability of x under reparam distribution.
 
-        function: Tensorflow op.
+        Returns:
+        --------
+            tensorflow.Tensor that contains the log probability of input x.
         """
-        return tf.reduce_mean(function(self.cond_sample(n_samples)), axis=0)
+        return tf.reduce_sum(self.dist.log_prob(x), axis=-1)
 
-    def entropy(self, n_samples=1):
-        """Computes monte-carlo estimate of entropy of the random variable."""
-        return self.expected_value(self.neg_log_density, n_samples=n_samples)
+    def sample(self, n_samples):
+        """Samples from the reparameterized distribution.
 
-
-class MultiLayerStochastic(ConditionalStochasticModel):
-    """Implements multilayer perceptron conditional normal."""
-
-    def __init__(self, dim, a, hidden_layers):
-        super(MultiLayerStochastic, self).__init__(dim, a)
-        # Reparametrization of the random variable.
-        self.a = a
-        layers = hidden_layers + [self.dim]
-        with self.graph.as_default():
-            self.mu = MultiLayerPerceptron(self.a, layers).get_output_layer()
-            self.sigma = MultiLayerPerceptron(
-                self.a, layers).get_output_layer()
-            # Added epsilon term basically initializes scale to be non-zero.
-            epsilon = 0.000001
-            self.scale = tf.pow(self.sigma, 2) + epsilon
-            self.distribution = tf.distributions.Normal(
-                loc=self.mu, scale=self.scale)
-
-    def log_density(self, x):
-        return tf.reduce_sum(self.distribution.log_prob(x), axis=-1)
-
-    def cond_sample(self, n_samples=1):
-        with self.graph.as_default():
-            samples = self.distribution.sample(n_samples)
-            return samples
+        Parameters:
+        -----------
+        n_samples: int
+            Number of samples.
+        Returns:
+        --------
+            tensorflow.Tensor.
+        """
+        return self.dist.sample(n_samples)
 
 
 class AutoEncodingVariationalBayes(object):
@@ -113,17 +114,6 @@ class AutoEncodingVariationalBayes(object):
         recognition_model: ConditionalStochasticModel
             Variational model Q(Z|X)
         """
-        if not isinstance(prob_model, ConditionalStochasticModel):
-            raise ValueError(
-                "prob_model should be of type 'ConditionalStochasticModel'.")
-        if not isinstance(recognition_model, ConditionalStochasticModel):
-            raise ValueError(
-                "recognition_model should be of type 'ConditionalStochasticModel'.")
-        if not recognition_model.graph == prob_model.graph:
-            raise ValueError(
-                "Both models should share the same graph.")
-        if not isinstance(optimizer, tf.train.Optimizer):
-            raise ValueError("optimizer should be of type 'tf.train.Optimizer'.")
         # Probability model plays the role of decoder
         # and recognition model plays the role of encoder.
         self.graph = prob_model.graph
@@ -158,7 +148,7 @@ class AutoEncodingVariationalBayes(object):
             self.loss += tf.reduce_sum(
                 self.prior.log_prob(self.z))
             self.train_op = self.optimizer.minimize(-self.loss)
-            self.recon = self.decoder.cond_sample()
+            self.recon = self.decoder.mu
 
     def initialize(self):
         """Initializes the variables of the computation graph.
@@ -190,8 +180,3 @@ class AutoEncodingVariationalBayes(object):
             return self.session.run(
                 self.loss, feed_dict={self.x: observations})
 
-class NormalizingFlow(ConditionalStochasticModel):
-    """Normalizing flow random variable for hooshmand shokri razaghi."""
-
-    def __init__(self, graph, dim):
-        super(NormalizingFlow, self).__init__(graph, dim)
