@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 
 from normalizing_flow import PlanarFlow
-
+from variational import MultiLayerPerceptron
 
 class Transform(object):
 
@@ -24,7 +24,7 @@ class QTransform(object):
     def __init__(self, in_dim, out_dim, initial_value=None):
         if initial_value is None:
             self.f = []
-            for i in range(4):
+            for i in range(10):
                 self.f.append(PlanarFlow(dim=in_dim))
 
     def operator(self, x):
@@ -33,20 +33,26 @@ class QTransform(object):
             out = flow.transform(out)
         return out
 
+class MLPTransform(object):
 
-class QTransform(object):
-
-    def __init__(self, in_dim, out_dim, initial_value=None):
-        if initial_value is None:
-            self.f = []
-            for i in range(4):
-                self.f.append(PlanarFlow(dim=in_dim))
+    def __init__(self, in_dim, out_dim, layers = [64, 64], activation=tf.nn.relu):
+        self.activation = activation
+        layers = [in_dim] + layers + [out_dim]
+        self.trans = []
+        self.bias = []
+        for i in range(len(layers) - 1):
+            in_dim = layers[i]
+            out_dim = layers[i + 1]
+            init_val = np.random.normal(
+                    0, 1, [in_dim, out_dim])
+            self.trans.append(tf.Variable(init_val))
+            self.bias.append(tf.Variable(
+                    np.random.normal(0, 1, [1, out_dim])))
 
     def operator(self, x):
-        out = x
-        for flow in self.f:
-            out = flow.transform(out)
-        return out
+        for trans, bias in zip(self.trans, self.bias):
+            x = self.activation(tf.matmul(x, trans) + bias)
+        return x
 
 
 class ConditionalRandomVariable(object):
@@ -59,7 +65,8 @@ class ConditionalRandomVariable(object):
         # Currently only normal initializer.
         # Change to inlucde other schemes as well.
         self.noise = tf.Variable(
-            np.ones(dim_x) * noise)
+            np.zeros(dim_x) - noise) 
+        self.noise = tf.nn.softplus(self.noise)
         self.transform = transform
 
     def make_distribution(self, y):
@@ -118,19 +125,21 @@ class MarkovLatentDynamics(object):
             z_tminus = z_t
         return log_prob
 
-    def sample(self, n_samples, z_not=None):
+    def sample(self, n_samples, time_steps=None, z_not=None):
         """Samples from the latent dynamics model.
 
         Returns:
         --------
         numpy.ndarray of shape
         """
+        if time_steps is None:
+            time_steps = self.time_steps
         if z_not is None: 
             z = [self.init_state_p.sample(n_samples)]
         else:
             z = [z_not]
         x = []
-        for i in range(self.time_steps):
+        for i in range(time_steps):
             if not i == 0:
                 z.append(self.transition.sample(z[-1]))
             x.append(self.emmision.sample(z[-1]))
@@ -143,4 +152,59 @@ class MarkovLatentDynamics(object):
         for i in range(self.time_steps):
             z_t = tf.slice(z, [0, i * lat_dim], [-1, lat_dim]) 
             x.append(self.emmision.sample(z_t))
+        return tf.concat(x, axis=1)
+
+class MarkovDynamics(object):
+
+    def __init__(self, transition, time_steps):
+        """Sets up the necessary networks for the markov latent dynamics."""
+        self.time_steps = time_steps
+        self.transition = transition
+
+        self.init_loc = tf.Variable(np.zeros(self.transition.dim_x))
+        self.init_noise = tf.Variable(np.ones(self.transition.dim_x))
+        self.init_state_p = tf.distributions.Normal(
+            loc=self.init_loc, scale=self.init_noise)
+
+    def log_prob(self, x):
+        """Log evidence of observations and latent states.
+        
+        Parameters:
+        -----------
+        z: numpy.ndarray
+        Samples from the hidden states of shape (S, T x d)
+        x: numpy.ndarray
+        Samples from the observations of shape (S, T x D)
+        """
+        n_samples = x.shape[0].value
+        log_prob = 0
+        for i in range(self.time_steps):
+            obs_dim = self.transition.dim_x
+            # Current time step latent state and observation
+            x_t = tf.slice(x, [0, i * obs_dim], [-1, obs_dim])
+            if i == 0:
+                log_prob += tf.reduce_sum(
+                    self.init_state_p.log_prob(x_t), axis=1)
+            else:
+                log_prob += self.transition.log_prob(x_t, x_tminus)
+            # Update the previous latent state for next iteration
+            x_tminus = x_t
+        return log_prob
+
+    def sample(self, n_samples, time_steps=None, x_not=None):
+        """Samples from the latent dynamics model.
+
+        Returns:
+        --------
+        numpy.ndarray of shape
+        """
+        if time_steps is None:
+            time_steps = self.time_steps
+        if x_not is None: 
+            x = [self.init_state_p.sample(n_samples)]
+        else:
+            x = [x_not]
+        for i in range(time_steps):
+            if not i == 0:
+                x.append(self.transition.sample(x[-1]))
         return tf.concat(x, axis=1)
