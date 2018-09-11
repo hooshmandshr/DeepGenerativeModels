@@ -5,7 +5,19 @@ import tensorflow as tf
 from normalizing_flow import PlanarFlow
 from variational import MultiLayerPerceptron
 
+
 class Transform(object):
+
+    def __init__(self, in_dim, out_dim, initial_value=None):
+        pass
+
+    def operator(self, x):
+        """Gives the tensorflow operation for transforming a tensor."""
+        pass
+
+
+
+class LinearTransform(Transform):
 
     def __init__(self, in_dim, out_dim, initial_value=None):
         if initial_value is None:
@@ -19,7 +31,32 @@ class Transform(object):
         return tf.matmul(x, self.lin_trans) + self.bias
 
 
-class QTransform(object):
+class LorentzTransform(Transform):
+
+    def __init__(self, initial_value=None):
+        """Sets up Lorentz transformation variables."""
+        if initial_value is None:
+            initial_value = np.random.normal(
+                0, 1, 4)
+        self.var = tf.Variable(initial_value)
+        self.sigma = self.var[0]
+        self.rho = self.var[1]
+        self.beta = self.var[2]
+        self.time_delta = tf.nn.sigmoid(self.var[3]) * 0.05
+
+    def operator(self, x):
+        if not(x.shape[-1].value == 3):
+            raise ValueError('Dimension of variable should be 3')
+        x_ = tf.slice(x, [0, 0], [-1, 1])
+        y_ = tf.slice(x, [0, 1], [-1, 1])
+        z_ = tf.slice(x, [0, 2], [-1, 1])
+        return x + self.time_delta * tf.concat([
+            self.sigma * (y_ - x_),
+            x_ * (self.rho - z_) - y_,
+            x_ * y_ - self.beta * z_], axis=1)
+
+
+class QTransform(Transform):
 
     def __init__(self, in_dim, out_dim, initial_value=None):
         if initial_value is None:
@@ -33,7 +70,8 @@ class QTransform(object):
             out = flow.transform(out)
         return out
 
-class MLPTransform(object):
+
+class MLPTransform(Transform):
 
     def __init__(self, in_dim, out_dim, layers = [64, 64], activation=tf.nn.relu):
         self.activation = activation
@@ -84,6 +122,29 @@ class ConditionalRandomVariable(object):
         return tf.squeeze(dist.sample(n_samples))
 
 
+class ConditionalPoissonVariable(object):
+    """Conditional probability model P(x|y)."""
+
+    def __init__(self, dim_x, dim_y, transform):
+        self.dim_x = dim_x
+        self.dim_y = dim_y
+        self.transform = transform
+
+    def make_distribution(self, y):
+        lambda_ = tf.nn.softplus(self.transform.operator(y))
+        return tf.contrib.distributions.Poisson(
+            rate=lambda_)
+
+    def log_prob(self, x, y):
+        dist = self.make_distribution(y)
+        return tf.reduce_sum(
+            dist.log_prob(x), axis=1)
+
+    def sample(self, y, n_samples=1):
+        dist = self.make_distribution(y)
+        return tf.squeeze(dist.sample(n_samples))
+
+
 class MarkovLatentDynamics(object):
 
     def __init__(self, transition, emmision, time_steps):
@@ -93,7 +154,8 @@ class MarkovLatentDynamics(object):
         self.transition = transition
 
         self.init_loc = tf.Variable(np.zeros(self.transition.dim_x))
-        self.init_noise = tf.Variable(np.ones(self.transition.dim_x))
+        self.init_noise = tf.nn.softplus(
+                tf.Variable(np.ones(self.transition.dim_x)))
         self.init_state_p = tf.distributions.Normal(
             loc=self.init_loc, scale=self.init_noise)
 
@@ -154,6 +216,7 @@ class MarkovLatentDynamics(object):
             x.append(self.emmision.sample(z_t))
         return tf.concat(x, axis=1)
 
+
 class MarkovDynamics(object):
 
     def __init__(self, transition, time_steps):
@@ -161,8 +224,8 @@ class MarkovDynamics(object):
         self.time_steps = time_steps
         self.transition = transition
 
-        self.init_loc = tf.Variable(np.zeros(self.transition.dim_x))
-        self.init_noise = tf.Variable(np.ones(self.transition.dim_x))
+        self.init_loc = tf.Variable(np.zeros(self.transition.dim_x)) + 1.
+        self.init_noise = tf.nn.softplus(tf.Variable(np.ones(self.transition.dim_x)))
         self.init_state_p = tf.distributions.Normal(
             loc=self.init_loc, scale=self.init_noise)
 
