@@ -1,4 +1,14 @@
+"""Tools for sparse representation of block(bi-tri)diagonal matrices.
 
+Proveds classes block diagonal, block-bi-diagonal, and block-tri-diagonal
+marices and respectively their inverce, solving a linear system (Ax=B, in
+other words x=A-1 B), and cholesky factor decomposition.
+
+1) Inverse of a BlockDiagonalMatrix is another BlockDiagonalMatrix.
+2) Solving Ax=B for x where A is a BlockBiDiagnolMatrix is a tensorflow.Tensor
+of shape of resulting matrix (i.e. A-1B).
+3) Cholesky factor of a BlockTriDiagonalMatrix is a BlockBiDiagonalMatrix.
+"""
 import numpy as np
 import tensorflow as tf
 
@@ -6,13 +16,13 @@ import tensorflow as tf
 class BlockDiagonalMatrix(object):
 
     def __init__(self, diag_block):
-        """Set up the tensorflow variables.
+        """Set up the blocks of the matrix (lower-bi-diagonal) by default.
 
         params:
         -------
-        diag_block: tensorflow.Tensor of shape (T, N, N)
-            represents T respective square (N x N) blocks of
-            the matrix.
+        diag_block: tensorflow.Tensor of shape (T, D, D)
+            Respectively the T Digaonal blocks of the matrix where each have
+            D x D dimensions.
         """
         self.num_block = diag_block.shape[0].value
         self.block_dim = diag_block.shape[1].value
@@ -36,7 +46,17 @@ class BlockDiagonalMatrix(object):
 class BlockBiDiagonalMatrix(BlockDiagonalMatrix):
 
     def __init__(self, diag_block, offdiag_block):
-        """Set up the tensorflow variables"""
+        """Set up the blocks of the matrix (lower-bi-diagonal) by default.
+
+        params:
+        -------
+        diag_block: tensorflow.Tensor of shape (T, D, D)
+            Respectively the T Digaonal blocks of the matrix where each have
+            D x D dimensions.
+        offdiag_block: tensorflow.Tensor of shape (T-1, D, D)
+            Respectively the T - 1 Digaonal blocks of the matrix where each
+            have D x D dimensions. 
+        """
         super(BlockBiDiagonalMatrix, self).__init__(
             diag_block=diag_block)
         # Lower off diagonal blocks by default.
@@ -84,11 +104,29 @@ class BlockBiDiagonalMatrix(BlockDiagonalMatrix):
 class BlockTriDiagonalMatrix(BlockBiDiagonalMatrix):
 
     def __init__(self, diag_block, offdiag_block):
-        """Set up the tensorflow variables"""
+        """Set up the blocks of the matrix (lower-bi-diagonal) by default.
+
+        params:
+        -------
+        diag_block: tensorflow.Tensor of shape (T, D, D)
+            Respectively the T Digaonal blocks of the matrix where each have
+            D x D dimensions.
+        offdiag_block: tensorflow.Tensor of shape (T-1, D, D)
+            Respectively the T - 1 Digaonal blocks of the matrix where each
+            have D x D dimensions. 
+        """
+
         super(BlockTriDiagonalMatrix, self).__init__(
             diag_block=diag_block, offdiag_block=offdiag_block)
 
     def cholesky(self):
+        """Coputes the cholesky factor (lower triangular) of the matrix.
+
+        returns:
+        --------
+        BlockBiDiagonalMatrix which represents the lower tirangular cholesky
+        factor of block-tri-diagonal matrix that the objects represents.
+        """
         result_diag = []
         result_offdiag = []
         result_diag.append(self.diag_block[0])
