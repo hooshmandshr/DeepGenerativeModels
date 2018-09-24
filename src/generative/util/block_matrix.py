@@ -45,7 +45,7 @@ class BlockDiagonalMatrix(object):
 
 class BlockBiDiagonalMatrix(BlockDiagonalMatrix):
 
-    def __init__(self, diag_block, offdiag_block):
+    def __init__(self, diag_block, offdiag_block, lower=True):
         """Set up the blocks of the matrix (lower-bi-diagonal) by default.
 
         params:
@@ -55,12 +55,16 @@ class BlockBiDiagonalMatrix(BlockDiagonalMatrix):
             D x D dimensions.
         offdiag_block: tensorflow.Tensor of shape (T-1, D, D)
             Respectively the T - 1 Digaonal blocks of the matrix where each
-            have D x D dimensions. 
+            have D x D dimensions.
+        lower: bool
+            True if the matrix is a lower-block-bi-diagonal matrix. Otherwise,
+            upper-bi-diagonal-matrix.
         """
         super(BlockBiDiagonalMatrix, self).__init__(
             diag_block=diag_block)
         # Lower off diagonal blocks by default.
         self.offdiag_block = offdiag_block
+        self.lower = lower
 
     def solve(self, b):
         """Returns x for which Ax=b where A is the matrix.
@@ -79,27 +83,50 @@ class BlockBiDiagonalMatrix(BlockDiagonalMatrix):
             return tf.reduce_sum(
                 tf.expand_dims(M, axis=0) * tf.expand_dims(x, axis=1),
                 axis=2)
-        x = []
-        b_1 = tf.slice(b, [0, 0], [-1, self.block_dim])
-        x.append(dot(tf.linalg.inv(self.diag_block[0]), b_1))
-        for i in range(1, self.num_block):
-            idx = i * self.block_dim
-            b_idx = tf.slice(b, [0, idx], [-1, self.block_dim])
-            g = b_idx - dot(self.offdiag_block[i-1], x[-1])
-            x.append(dot(tf.linalg.inv(self.diag_block[i]), g))
+        def b_slice(time):
+            start_idx = time * self.block_dim
+            return tf.slice(b, [0, start_idx], [-1, self.block_dim])
+
+        if self.lower:
+            x = []
+            x.append(dot(tf.linalg.inv(self.diag_block[0]), b_slice(0)))
+            for i in range(1, self.num_block):
+                g = b_slice(i) - dot(self.offdiag_block[i-1], x[-1])
+                x.append(dot(tf.linalg.inv(self.diag_block[i]), g))
+        else:
+            x = []
+            x.append(dot(tf.linalg.inv(
+                self.diag_block[-1]), b_slice(self.num_block - 1)))
+            for i in range(0, self.num_block - 1)[::-1]:
+                g = b_slice(i) - dot(self.offdiag_block[i], x[-1])
+                x.append(dot(tf.linalg.inv(self.diag_block[i]), g))
+            x.reverse()
         return tf.concat(x, axis=1)
 
-        # Diagonal blocks of the resulting matrix.
-        def dot(M, x):
-            return tf.reduce_sum(M * x, axis=1)
-        x = []
-        x.append(dot(tf.linalg.inv(self.diag_block[0]), b[:self.block_dim]))
-        for i in range(1, self.num_block):
-            idx = i * self.block_dim
-            g = b[idx:idx + self.block_dim] - dot(self.offdiag_block[i-1], x[-1])
-            x.append(dot(tf.linalg.inv(self.diag_block[i]), g))
-        return tf.concat(x, axis=0)
+    def transpose(self, in_place=False):
+        """Transposes the matrix by transposing the blocks.
 
+        params:
+        -------
+        in_place: bool
+            If True, the transpose operation is done in place. Otherwise, a new
+            BlockBiDiagonalMatrix is returned.
+
+        returns:
+        --------
+        None or BlockBiDiagonalMatrix.
+        """
+        if in_place:
+            self.diag_block = tf.transpose(self.diag_block, perm=[0, 2, 1])
+            self.offdiag_block = tf.transpose(
+                    self.offdiag_block, perm=[0, 2, 1])
+            self.lower = not self.lower
+        else:
+            return BlockBiDiagonalMatrix(
+                    diag_block=tf.transpose(self.diag_block, perm=[0, 2, 1]),
+                    offdiag_block=tf.transpose(
+                        self.offdiag_block, perm=[0, 2, 1]),
+                    lower=not(self.lower))
 
 class BlockTriDiagonalMatrix(BlockBiDiagonalMatrix):
 
@@ -147,3 +174,4 @@ class BlockTriDiagonalMatrix(BlockBiDiagonalMatrix):
         result_offdiag = expand(result_offdiag)
         return BlockBiDiagonalMatrix(
             diag_block=result_diag, offdiag_block=result_offdiag)
+

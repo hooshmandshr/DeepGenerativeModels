@@ -74,9 +74,12 @@ def test_cholesky():
         chl_offdiag_tensor = chl_matrix.offdiag_block
         # Inverse Cholesky solve.
         solve_tensor = chl_matrix.solve(tf.constant(b))
+        chl_matrix.transpose(in_place=True)
+        solve_transpose_tensor = chl_matrix.solve(tf.constant(b))
         with tf.Session() as sess:
-            chl_res_diag, chl_res_offdiag, solve_res = sess.run(
-                [chl_diag_tensor, chl_offdiag_tensor, solve_tensor])
+            chl_res_diag, chl_res_offdiag, solve_res, solve_t_res = sess.run(
+                [chl_diag_tensor, chl_offdiag_tensor, solve_tensor,
+                    solve_transpose_tensor])
     dense_cholesky = np.linalg.cholesky(dense_matrix(diag, offdiag))
     dense_result = dense_matrix(chl_res_diag, chl_res_offdiag)
     print "Testing cholesky factor computation."
@@ -87,6 +90,14 @@ def test_cholesky():
     dense_solve_cholesky = np.matmul(np.linalg.inv(dense_cholesky), b.T)
     print "Testing cholesky inverse."
     assert np.allclose(dense_solve_cholesky.T, solve_res), 'Cholesky inverse'
+
+
+    # Solve choleskey system given b if the matrix is transposed. In otherwords
+    # we want the result of A^{-T}b.
+    dense_solve_cholesky = np.matmul(np.linalg.inv(dense_cholesky).T, b.T)
+    print "Testing cholesky transpose inverse."
+    assert np.allclose(dense_solve_cholesky.T, solve_t_res), 'Cholesky transpose inverse'
+
 
 
 if __name__ == "__main__":
