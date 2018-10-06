@@ -96,7 +96,7 @@ class ReparameterizedDistribution(Model):
         if y in self.dist_dict:
             # Necessary tf.Distribution has already been created for y.
             return self.dist_dict[y]
-
+        # Multivariate (Logit) normal with diagonal covariance.
         if self.dist_class is tf.distributions.Normal or\
                 self.dist_class is LogitNormal:
             # Rectify standard deviation so that it is a smooth
@@ -108,11 +108,27 @@ class ReparameterizedDistribution(Model):
                     in_dim=self.in_dim, out_dim=self.out_dim,
                     **self.trans_args).operator(y))
             dist = self.dist_class(loc=loc_, scale=scale_)
+        # Multivariate Poisson (independent variables).
         elif self.dist_class is tf.contrib.distributions.Poisson:
             rate_ = tf.nn.softmax(self.transform_class(
                     in_dim=self.in_dim, out_dim=self.out_dim,
                     **self.trans_args).operator(y))
             dist = self.dist_class(rate_)
+        # Multivariate Normal With full covariance.
+        elif self.dist_class is\
+                tf.contrib.distributions.MultivariateNormalFullCovariance:
+            loc_ = self.transform_class(
+                    in_dim=self.in_dim, out_dim=self.out_dim,
+                    **self.trans_args).operator(y)
+            cov_ = self.transform_class(
+                    in_dim=self.in_dim, out_dim=self.out_dim * self.out_dim,
+                    **self.trans_args).operator(y)
+            cov_ = tf.reshape(cov_, [-1, self.out_dim, self.out_dim])
+            # Ensure that the covariance matrix is symmetric SDP.
+            cov_ = tf.matrix_band_part(cov_, -1, 0)
+            cov_ = tf.matmul(cov_, cov_, transpose_a=True)
+            # Enforce postive definiteness.
+            dist = self.dist_class(loc=loc_, covariance_matrix=cov_)
 
         # Store the created distribution for tensor y in the dictionary.
         self.dist_dict[y] = dist
@@ -130,6 +146,7 @@ class ReparameterizedDistribution(Model):
                 self.dist_class is LogitNormal or\
                 self.dist_class is tf.contrib.distributions.Poisson:
             return tf.reduce_sum(dist.log_prob(x), axis=-1)
+        return dist.log_prob(x)
 
     def sample(self, y, n_samples):
         """Samples from the reparameterized distribution.
@@ -159,4 +176,4 @@ class ReparameterizedDistribution(Model):
         dist = self.get_distribution(y)
         if self.dist_class is tf.distributions.Normal:
             return tf.reduce_sum(dist.entropy(), axis=-1)
-
+        return dist.entropy()
